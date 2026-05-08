@@ -91,3 +91,51 @@ if [[ $ARGOCD_INSTANCE_PROVIDED == "true" ]]; then
     # Create the plugin and config setup configmaps in the namespace
     kubectl apply -n $EXISTING_NAMESPACE -f $BASE_DIR/resources/argocd-config.yaml
 fi
+
+# Auto-register remote clusters in Argo CD
+if [ ! -z "${REMOTE_CLUSTER_COUNT}" ] && [ "${REMOTE_CLUSTER_COUNT}" -gt 0 ]; then
+  echo "* Registering remote clusters in ArgoCD *"
+
+  ARGO_NAMESPACE="$NAMESPACE"
+  if [[ $ARGOCD_INSTANCE_PROVIDED == "true" ]] && [ -n "$EXISTING_NAMESPACE" ]; then
+    ARGO_NAMESPACE="$EXISTING_NAMESPACE"
+  fi
+
+  for ((i=1; i<=REMOTE_CLUSTER_COUNT; i++)); do
+    sa_var="REMOTE_K8S_SA_${i}"
+    url_var="REMOTE_K8S_URL_${i}"
+    token_var="REMOTE_K8S_SA_TOKEN_${i}"
+
+    server="${!url_var}"
+    token="${!token_var}"
+    # Derive cluster name from server by removing scheme and trailing slash
+    cluster_name="${server#*://}"
+    cluster_name="${cluster_name%/}"
+
+    if [ -z "$server" ] || [ -z "$token" ]; then
+      echo "  - Skipping cluster $i: missing server or token"
+      continue
+    fi
+
+    secret_name="argocd-remote-cluster-${i}"
+
+    # Build TLS config - secure by default
+    if [[ "${SKIP_TLS_VERIFY}" == "true" ]]; then
+      tls_config='{"bearerToken": "'"${token}"'", "tlsClientConfig": {"insecure": true}}'
+    else
+      tls_config='{"bearerToken": "'"${token}"'"}'
+    fi
+
+    kubectl create secret generic "${secret_name}" \
+      --namespace="$ARGO_NAMESPACE" \
+      --type=Opaque \
+      --from-literal=name="${cluster_name}" \
+      --from-literal=server="${server}" \
+      --from-literal=config="${tls_config}" \
+      --label="argocd.argoproj.io/secret-type=cluster" \
+      --label="app.kubernetes.io/managed-by=ai-rhdh-installer" \
+      --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+    echo "  - Registered ${cluster_name:-$server} in namespace ${ARGO_NAMESPACE} (secret ${secret_name})"
+  done
+fi

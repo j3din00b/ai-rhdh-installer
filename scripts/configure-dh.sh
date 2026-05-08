@@ -310,8 +310,15 @@ configure_dh() {
         echo -n "."
     fi
 
-    if [[ "$(is_extra_envs_patch "${EXISTING_EXTRA_ENV_SECRET}" "${RHDH_DEPLOYMENT}" "${NAMESPACE}")" == "true" ]]; then
-        if [ -z "${EXISTING_EXTRA_ENV_SECRET}" ]; then RHDH_EXTRA_ENV_SECRET="$(get_extra_envs_secret "${RHDH_DEPLOYMENT}" "${NAMESPACE}")"; fi
+    if [[ "$(is_extra_envs_patch "${EXISTING_EXTRA_ENV_SECRET}" "${RHDH_DEPLOYMENT}" "${NAMESPACE}" "${BACKSTAGE_CR_NAME}")" == "true" ]]; then
+        # Get existing secret name - try installer annotation first, then CR
+        if [ -z "${EXISTING_EXTRA_ENV_SECRET}" ]; then
+            RHDH_EXTRA_ENV_SECRET="$(get_extra_envs_secret "${RHDH_DEPLOYMENT}" "${NAMESPACE}")"
+            # If not found via installer annotation, try getting from Backstage CR
+            if [ -z "${RHDH_EXTRA_ENV_SECRET}" ] || [[ "${RHDH_EXTRA_ENV_SECRET}" == "error: not found" ]]; then
+                RHDH_EXTRA_ENV_SECRET="$(get_extra_envs_secret_from_cr "${BACKSTAGE_CR_NAME}" "${NAMESPACE}")"
+            fi
+        fi
         kubectl patch secret ${RHDH_EXTRA_ENV_SECRET} -n $NAMESPACE \
         --type 'merge' \
         -p="$EXTRA_ENV_SECRET_PATCH" >/dev/null
@@ -395,7 +402,7 @@ configure_dh() {
         echo "[FAIL] Extra env secret '${RHDH_EXTRA_ENV_SECRET}' not found!"
         return 1
     fi
-    if [[ "$(is_extra_envs_attached "${RHDH_EXTRA_ENV_SECRET}" "${RHDH_DEPLOYMENT}" "${NAMESPACE}")" == "false" ]]; then
+    if [[ "$(is_extra_envs_attached "${RHDH_EXTRA_ENV_SECRET}" "${RHDH_DEPLOYMENT}" "${NAMESPACE}" "${BACKSTAGE_CR_NAME}")" == "false" ]]; then
         echo -n "* Adding extra env secret to RHDH deployment: "
         if [[ $RHDH_INSTANCE_PROVIDED == "true" ]]; then
             attach_extra_envs_to_deployment "${RHDH_EXTRA_ENV_SECRET}" "${RHDH_DEPLOYMENT}" "${NAMESPACE}"
@@ -463,18 +470,20 @@ configure_dh() {
         }]" "$temp_tekton_plugins"
         
         # Build the additional clusters YAML
+        # Use environment variable for TLS verification (secure by default)
+        skip_tls_verify="${SKIP_TLS_VERIFY:-false}"
         for ((i=1; i<=REMOTE_CLUSTER_COUNT; i++)); do
             sa_var="REMOTE_K8S_SA_${i}"
             url_var="REMOTE_K8S_URL_${i}"
             token_var="REMOTE_K8S_SA_TOKEN_${i}"
             auth_var="REMOTE_K8S_AUTH_PROVIDER_${i}"
-            
+
             # Add remote cluster to the clusters array
             yq -i ".plugins[2].pluginConfig.kubernetes.clusterLocatorMethods[0].clusters += {
                 \"authProvider\": \"\${${auth_var}}\",
                 \"name\": \"\${${sa_var}}\",
                 \"serviceAccountToken\": \"\${${token_var}}\",
-                \"skipTLSVerify\": true,
+                \"skipTLSVerify\": ${skip_tls_verify},
                 \"url\": \"\${${url_var}}\"
             }" "$temp_tekton_plugins"
         done
